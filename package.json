@@ -6,15 +6,18 @@
   "bin": "index.js",
   "scripts": {
     "start": "node index.js",
-    "build": "pkg . --out-path dist --targets node18-win-x64,node18-macos-x64,node18-macos-arm64 --no-bytecode --public-packages \"*\"",
+    "build": "pkg . --out-path dist --targets node18-win-x64,node18-macos-x64,node18-macos-arm64,node18-linux-x64,node18-linux-arm64 --no-bytecode --public-packages \"*\"",
     "build:win": "pkg . --out-path dist --targets node18-win-x64 --no-bytecode --public-packages \"*\"",
-    "build:mac": "pkg . --out-path dist --targets node18-macos-x64,node18-macos-arm64 --no-bytecode --public-packages \"*\""
+    "build:mac": "pkg . --out-path dist --targets node18-macos-x64,node18-macos-arm64 --no-bytecode --public-packages \"*\"",
+    "build:linux": "pkg . --out-path dist --targets node18-linux-x64,node18-linux-arm64 --no-bytecode --public-packages \"*\""
   },
   "pkg": {
     "targets": [
       "node18-win-x64",
       "node18-macos-x64",
-      "node18-macos-arm64"
+      "node18-macos-arm64",
+      "node18-linux-x64",
+      "node18-linux-arm64"
     ],
     "outputPath": "dist"
   },

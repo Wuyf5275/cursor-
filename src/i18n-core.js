@@ -128,20 +128,35 @@ function fixMacGatekeeper(appPath) {
 
     console.log('🍎 正在修复 macOS Gatekeeper 签名...');
 
-    // 1. 清除隔离属性
+    // 1. 清除所有扩展属性（包括隔离属性和公证票据标记）
     try {
         execSync(`xattr -cr "${appBundlePath}"`, { stdio: 'pipe' });
-        console.log('  ✅ 已清除隔离属性 (xattr -cr)');
+        console.log('  ✅ 已清除扩展属性 (xattr -cr)');
     } catch (e) {
-        console.log('  ⚠️ 清除隔离属性失败: ' + e.message);
+        console.log('  ⚠️ 清除扩展属性失败: ' + e.message);
     }
 
-    // 2. 重签名（容错：用户可能未安装 Xcode 命令行工具）
+    // 2. 移除旧签名（含残留的公证票据，避免与新签名冲突）
+    try {
+        execSync(`codesign --remove-signature "${appBundlePath}"`, { stdio: 'pipe' });
+        console.log('  ✅ 已移除旧签名');
+    } catch (e) {
+        // 可能本来就没有签名，忽略
+    }
+
+    // 3. 使用 ad-hoc 签名重新签名
     try {
         execSync(`codesign --force --deep --sign - "${appBundlePath}"`, { stdio: 'pipe' });
         console.log('  ✅ 已完成本地重签名 (codesign)');
     } catch (e) {
         console.log('  ⚠️ codesign 重签名失败（可能未安装 Xcode 命令行工具），不影响使用: ' + e.message);
+    }
+
+    // 4. 再次清除扩展属性（签名过程可能引入新的属性）
+    try {
+        execSync(`xattr -cr "${appBundlePath}"`, { stdio: 'pipe' });
+    } catch (e) {
+        // 忽略
     }
 }
 
