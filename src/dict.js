@@ -291,7 +291,9 @@ const safeGlobalDict = {
 const riskyShortWords = {
     "General": "通用",
     "Agents": "智能体",
-    "Tab": "Tab 补全",
+    // "Tab" 不可放入危险短词：workbench 键盘扫描表为 [n,n,"Tab",n,"Tab",n,"VK_TAB"]，
+    // jsxRegex 会误匹配 49,"Tab" 导致 KeybindingService cannot be dispatched。
+    // 设置页侧栏 Tab 项由 i18n-core.js 的 tab:"Tab" → tab:"Tab 补全" 单独处理。
     "Models": "模型",
     "Plugins": "插件",
     "Hooks": "钩子",

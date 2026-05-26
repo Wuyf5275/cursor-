@@ -28,9 +28,28 @@ const longEntries = safeEntries.filter(([en]) => en.length >= 20);
 const longPattern = longEntries.map(([en]) => escapeRegExp(en)).join('|');
 const longMegaRegex = longPattern ? new RegExp(`(${longPattern})`, 'g') : null;
 
-// 危险短词的 UI 属性列表
-const uiProps = ['children', 'title', 'label', 'placeholder', 'description', 'tooltip', 'text'];
+// 危险短词的 UI 属性列表（仅限可见 UI 文案，勿覆盖键位/扫描表）
+const uiProps = [
+    'children', 'title', 'label', 'placeholder', 'description', 'tooltip', 'text',
+    'markdownDescription', 'aria-label', 'ariaLabel',
+];
 const uiPropsPattern = uiProps.join('|');
+
+/** 键盘扫描表、VK_*、KeyCode 等键位元数据 — 禁止汉化短词误伤 */
+function isProtectedKeybindingContext(content, index, word) {
+    const radius = 160;
+    const start = Math.max(0, index - radius);
+    const end = Math.min(content.length, index + radius + word.length);
+    const slice = content.slice(start, end);
+    const escaped = escapeRegExp(word);
+
+    if (/VK_[A-Z0-9_]+/.test(slice)) return true;
+    if (/\bKeyCode\b|\bScanCode\b|keybindingService|KeyboardEvent/.test(slice)) return true;
+    if (new RegExp(`\\[\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*["']${escaped}["']`).test(slice)) return true;
+    if (new RegExp(`["']${escaped}["']\\s*,\\s*\\d+\\s*,\\s*["']${escaped}["']`).test(slice)) return true;
+
+    return false;
+}
 
 // 为每个危险短词预编译 3 种正则
 const riskyRegexes = Object.entries(riskyShortWords).map(([en, zh]) => {
@@ -359,6 +378,11 @@ function translate(paths) {
         printJoke();
         jsContent = jsContent.replace(regex, zh);
     });
+
+    // 设置侧栏 Tab 项（不可走 riskyShortWords，否则会误伤键盘扫描表）
+    printJoke();
+    jsContent = jsContent.split('tab:"Tab"').join('tab:"Tab 补全"');
+
     // jsContent = jsContent.split('"Reset \\"Don\'t Ask Again\\" Dialogs"').join('"重置\\"不再询问\\"弹窗"');
     // jsContent = jsContent.split("'Reset \"Don\\'t Ask Again\" Dialogs'").join("'重置\"不再询问\"弹窗'");
     // jsContent = jsContent.split('label:\'Reset "Don\\u2019t Ask Again" Dialogs\'').join('label:\'重置“不再询问”弹窗\'');
@@ -366,12 +390,19 @@ function translate(paths) {
     // jsContent = jsContent.split('title:"No Hidden Dialogs Yet"').join('title:"暂无隐藏的弹窗"');
     // jsContent = jsContent.split('description:\'You haven\\u2019t marked any dialogs as "Don\\u2019t ask again". Any hidden dialogs will appear here to manage.\'').join('description:\'您尚未将任何弹窗标记为“不再询问”。任何隐藏的弹窗都将显示在此处以供管理。\'');
 
-    // 6. 危险短词：精准 UI 属性替换
-    for (const { zh, propRegex, jsxRegex, htmlRegex } of riskyRegexes) {
+    // 6. 危险短词：精准 UI 属性替换（跳过键盘扫描表等键位元数据）
+    for (const { en, zh, propRegex, jsxRegex, htmlRegex } of riskyRegexes) {
         printJoke();
-        jsContent = jsContent.replace(propRegex, `$1: $2${zh}$2`);
-        jsContent = jsContent.replace(jsxRegex, `$1, $2${zh}$2`);
-        jsContent = jsContent.replace(htmlRegex, `>${zh}<`);
+        const guard = (regex, build) => {
+            jsContent = jsContent.replace(regex, (...args) => {
+                const offset = args[args.length - 2];
+                if (isProtectedKeybindingContext(jsContent, offset, en)) return args[0];
+                return build(...args);
+            });
+        };
+        guard(propRegex, (_, p1, p2) => `${p1}: ${p2}${zh}${p2}`);
+        guard(jsxRegex, (_, p1, p2) => `${p1}, ${p2}${zh}${p2}`);
+        guard(htmlRegex, () => `>${zh}<`);
     }
 
     process.stdout.write('\n'); // 收尾换行
