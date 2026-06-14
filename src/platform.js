@@ -9,44 +9,306 @@ const sudo = require('sudo-prompt');
 
 const PLATFORM = os.platform(); // 'win32' | 'darwin'
 
+const CONFIG_DIR = path.join(os.homedir(), '.cursor-i18n-tool');
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+
+const WORKBENCH_MAIN = path.join('out', 'vs', 'workbench', 'workbench.desktop.main.js');
+
 /**
- * 探测 Cursor 安装路径，返回 app 目录
- * @returns {{ appPath: string, mainJsPath: string, htmlPath: string, productJsonPath: string } | null}
+ * 校验是否为有效的 Cursor resources/app 目录
  */
-function detectCursorPath() {
-    let candidates = [];
+function isValidAppPath(appPath) {
+    if (!appPath || !fs.existsSync(appPath)) return false;
+    return fs.existsSync(path.join(appPath, WORKBENCH_MAIN));
+}
 
-    if (PLATFORM === 'win32') {
-        const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-        const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
-        candidates = [
-            path.join(localAppData, 'Programs', 'cursor', 'resources', 'app'),
-            path.join(programFiles, 'cursor', 'resources', 'app'),
-        ];
-    } else if (PLATFORM === 'darwin') {
-        candidates = [
-            '/Applications/Cursor.app/Contents/Resources/app',
-            path.join(os.homedir(), 'Applications', 'Cursor.app', 'Contents', 'Resources', 'app'),
-        ];
-    } else {
-        return null;
-    }
-
-    const appPath = candidates.find(p => fs.existsSync(p));
-    if (!appPath) return null;
-
+/**
+ * 由 app 目录构建路径对象
+ */
+function buildPathsFromAppPath(appPath) {
+    const normalized = path.resolve(appPath);
     return {
-        appPath,
-        mainJsPath: path.join(appPath, 'out', 'vs', 'workbench', 'workbench.desktop.main.js'),
-        htmlPath: path.join(appPath, 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench.html'),
-        productJsonPath: path.join(appPath, 'product.json'),
+        appPath: normalized,
+        mainJsPath: path.join(normalized, 'out', 'vs', 'workbench', 'workbench.desktop.main.js'),
+        htmlPath: path.join(normalized, 'out', 'vs', 'code', 'electron-sandbox', 'workbench', 'workbench.html'),
+        productJsonPath: path.join(normalized, 'product.json'),
     };
 }
 
 /**
+ * 将用户输入（安装根目录、.app、exe、或 resources/app）规范化为 app 目录
+ * @param {string} input
+ * @returns {string | null}
+ */
+function normalizeToAppPath(input) {
+    if (!input || typeof input !== 'string') return null;
+
+    let p = input.trim().replace(/^["']|["']$/g, '');
+    if (!p) return null;
+
+    try {
+        p = path.resolve(p);
+    } catch {
+        return null;
+    }
+
+    if (!fs.existsSync(p)) return null;
+
+    if (isValidAppPath(p)) return p;
+
+    const base = path.basename(p);
+    const baseLower = base.toLowerCase();
+
+    // Windows: Cursor.exe 所在目录为安装根
+    if (baseLower === 'cursor.exe') {
+        const fromExe = path.join(path.dirname(p), 'resources', 'app');
+        if (isValidAppPath(fromExe)) return fromExe;
+    }
+
+    // macOS: Cursor.app
+    if (base.endsWith('.app')) {
+        const fromApp = path.join(p, 'Contents', 'Resources', 'app');
+        if (isValidAppPath(fromApp)) return fromApp;
+    }
+
+    // 安装根目录（含 resources/app）
+    const fromResources = path.join(p, 'resources', 'app');
+    if (isValidAppPath(fromResources)) return fromResources;
+
+    // macOS: 用户可能选中 Contents 或 Resources
+    const fromContents = path.join(p, 'Contents', 'Resources', 'app');
+    if (isValidAppPath(fromContents)) return fromContents;
+
+    const fromResourcesOnly = path.join(p, 'Resources', 'app');
+    if (isValidAppPath(fromResourcesOnly)) return fromResourcesOnly;
+
+    return null;
+}
+
+/**
+ * 默认候选安装路径（用于自动搜索）
+ */
+function getDefaultCandidates() {
+    if (PLATFORM === 'win32') {
+        const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+        const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+        const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+
+        return [
+            path.join(localAppData, 'Programs', 'cursor', 'resources', 'app'),
+            path.join(localAppData, 'cursor', 'resources', 'app'),
+            path.join(programFiles, 'cursor', 'resources', 'app'),
+            path.join(programFiles, 'Cursor', 'resources', 'app'),
+            path.join(programFilesX86, 'cursor', 'resources', 'app'),
+            path.join(programFilesX86, 'Cursor', 'resources', 'app'),
+        ];
+    }
+
+    if (PLATFORM === 'darwin') {
+        return [
+            '/Applications/Cursor.app/Contents/Resources/app',
+            path.join(os.homedir(), 'Applications', 'Cursor.app', 'Contents', 'Resources', 'app'),
+        ];
+    }
+
+    return [];
+}
+
+/**
+ * 在 macOS /Applications 下查找 Cursor*.app
+ */
+function scanMacApplicationsDir() {
+    const found = [];
+    const dirs = ['/Applications', path.join(os.homedir(), 'Applications')];
+
+    for (const dir of dirs) {
+        if (!fs.existsSync(dir)) continue;
+        let entries;
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+        for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+            const name = entry.name;
+            if (!/^Cursor.*\.app$/i.test(name)) continue;
+            const appPath = path.join(dir, name, 'Contents', 'Resources', 'app');
+            if (isValidAppPath(appPath)) found.push(appPath);
+        }
+    }
+    return found;
+}
+
+/**
+ * Windows: 从卸载注册表读取 InstallLocation（若存在）
+ */
+function readWindowsRegistryInstallPaths() {
+    if (PLATFORM !== 'win32') return [];
+
+    const found = [];
+    const regRoots = [
+        'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+        'HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+        'HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+    ];
+
+    const { execSync } = require('child_process');
+
+    for (const root of regRoots) {
+        let keyOutput;
+        try {
+            keyOutput = execSync(`reg query "${root}" /s /f "Cursor" /k`, {
+                encoding: 'utf8',
+                stdio: ['pipe', 'pipe', 'ignore'],
+                timeout: 8000,
+            });
+        } catch {
+            continue;
+        }
+
+        const installLocations = keyOutput.match(/InstallLocation\s+REG_SZ\s+(.+)/gi) || [];
+        for (const line of installLocations) {
+            const m = line.match(/InstallLocation\s+REG_SZ\s+(.+)/i);
+            if (!m) continue;
+            const loc = m[1].trim();
+            const appPath = normalizeToAppPath(loc);
+            if (appPath) found.push(appPath);
+        }
+    }
+
+    return found;
+}
+
+/**
+ * 自动搜索所有有效的 Cursor app 路径（去重）
+ * @returns {string[]}
+ */
+function findAllCursorCandidates() {
+    const seen = new Set();
+    const results = [];
+
+    function add(appPath) {
+        const resolved = path.resolve(appPath);
+        if (seen.has(resolved)) return;
+        if (!isValidAppPath(resolved)) return;
+        seen.add(resolved);
+        results.push(resolved);
+    }
+
+    for (const c of getDefaultCandidates()) {
+        add(c);
+    }
+
+    if (PLATFORM === 'darwin') {
+        for (const p of scanMacApplicationsDir()) {
+            add(p);
+        }
+    }
+
+    if (PLATFORM === 'win32') {
+        for (const p of readWindowsRegistryInstallPaths()) {
+            add(p);
+        }
+    }
+
+    return results;
+}
+
+function loadConfig() {
+    try {
+        if (!fs.existsSync(CONFIG_FILE)) return {};
+        const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
+        const data = JSON.parse(raw);
+        return typeof data === 'object' && data !== null ? data : {};
+    } catch {
+        return {};
+    }
+}
+
+function saveConfig(partial) {
+    try {
+        if (!fs.existsSync(CONFIG_DIR)) {
+            fs.mkdirSync(CONFIG_DIR, { recursive: true });
+        }
+        const prev = loadConfig();
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify({ ...prev, ...partial }, null, 2), 'utf8');
+    } catch {
+        // 配置写入失败不阻断主流程
+    }
+}
+
+/**
+ * 解析 Cursor 路径（CLI > 已保存 > 自动探测）
+ * @param {{ cliPath?: string | null }} [options]
+ * @returns {{ appPath: string, mainJsPath: string, htmlPath: string, productJsonPath: string } | null}
+ */
+function resolveCursorPath(options = {}) {
+    const { cliPath } = options;
+
+    if (cliPath) {
+        const appPath = normalizeToAppPath(cliPath);
+        if (appPath) {
+            saveConfig({ cursorAppPath: appPath });
+            return buildPathsFromAppPath(appPath);
+        }
+        return null;
+    }
+
+    const config = loadConfig();
+    if (config.cursorAppPath && isValidAppPath(config.cursorAppPath)) {
+        return buildPathsFromAppPath(config.cursorAppPath);
+    }
+
+    const candidates = findAllCursorCandidates();
+    if (candidates.length === 1) {
+        saveConfig({ cursorAppPath: candidates[0] });
+        return buildPathsFromAppPath(candidates[0]);
+    }
+
+    if (candidates.length > 1) {
+        // 多个安装：优先使用已保存且仍在列表中的路径
+        if (config.cursorAppPath) {
+            const saved = path.resolve(config.cursorAppPath);
+            const match = candidates.find(c => path.resolve(c) === saved);
+            if (match) return buildPathsFromAppPath(match);
+        }
+        return null;
+    }
+
+    return null;
+}
+
+/**
+ * 探测 Cursor 安装路径（兼容旧 API，等价于 resolveCursorPath）
+ */
+function detectCursorPath(options) {
+    return resolveCursorPath(options);
+}
+
+/**
+ * 将 app 路径编码到命令行参数（供提权子进程使用）
+ */
+function encodeCursorPathArg(appPath) {
+    return `--cursor-path=${JSON.stringify(appPath)}`;
+}
+
+/**
+ * 从 process.argv 解析 --cursor-path
+ */
+function parseCursorPathArg() {
+    const arg = process.argv.find(a => a.startsWith('--cursor-path='));
+    if (!arg) return null;
+    const raw = arg.slice('--cursor-path='.length);
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return raw.replace(/^["']|["']$/g, '');
+    }
+}
+
+/**
  * 检测目标文件是否有写入权限
- * @param {string} filePath
- * @returns {boolean}
  */
 function hasWritePermission(filePath) {
     try {
@@ -58,27 +320,22 @@ function hasWritePermission(filePath) {
 }
 
 /**
- * 以管理员权限重新拉起自身进程（静默模式，不再启动 inquirer）
- * 
- * 核心设计：追加 --action 参数，让提权后的子进程直接执行对应操作，
- * 绝不渲染 inquirer 菜单，避免无 TTY 环境下的进程死锁。
- * 
+ * 以管理员权限重新拉起自身进程
  * @param {'translate' | 'restore'} action
- * @returns {Promise<void>}
+ * @param {string} [cursorAppPath]
  */
-function elevateAndRun(action) {
+function elevateAndRun(action, cursorAppPath) {
     return new Promise((resolve, reject) => {
-        // 判断当前是 pkg 打包后的可执行文件 还是 node 源码运行
         const isPkg = typeof process.pkg !== 'undefined';
         let command;
 
+        const pathArg = cursorAppPath ? ` ${encodeCursorPathArg(cursorAppPath)}` : '';
+
         if (isPkg) {
-            // pkg 打包后：process.execPath 就是可执行文件本身
-            command = `"${process.execPath}" --action=${action}`;
+            command = `"${process.execPath}" --action=${action}${pathArg}`;
         } else {
-            // 源码运行：node index.js --action=translate
             const entryScript = path.resolve(__dirname, '..', 'index.js');
-            command = `"${process.execPath}" "${entryScript}" --action=${action}`;
+            command = `"${process.execPath}" "${entryScript}" --action=${action}${pathArg}`;
         }
 
         const options = {
@@ -90,7 +347,6 @@ function elevateAndRun(action) {
                 reject(error);
                 return;
             }
-            // 将子进程的输出透传到当前控制台
             if (stdout) process.stdout.write(stdout);
             if (stderr) process.stderr.write(stderr);
             resolve();
@@ -100,7 +356,16 @@ function elevateAndRun(action) {
 
 module.exports = {
     PLATFORM,
+    CONFIG_FILE,
+    isValidAppPath,
+    normalizeToAppPath,
+    buildPathsFromAppPath,
+    findAllCursorCandidates,
+    loadConfig,
+    saveConfig,
+    resolveCursorPath,
     detectCursorPath,
+    parseCursorPathArg,
     hasWritePermission,
     elevateAndRun,
 };

@@ -1,6 +1,6 @@
 {
   "name": "cursor-i18n-tool",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Cursor 编辑器一键汉化工具 — 跨平台独立可执行程序",
   "main": "index.js",
   "bin": "index.js",

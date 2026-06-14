@@ -28,11 +28,30 @@ const longEntries = safeEntries.filter(([en]) => en.length >= 20);
 const longPattern = longEntries.map(([en]) => escapeRegExp(en)).join('|');
 const longMegaRegex = longPattern ? new RegExp(`(${longPattern})`, 'g') : null;
 
-// 危险短词的 UI 属性列表
-const uiProps = ['children', 'title', 'label', 'placeholder', 'description', 'tooltip', 'text'];
+// 危险短词的 UI 属性列表（仅限可见 UI 文案，勿覆盖键位/扫描表）
+const uiProps = [
+    'children', 'title', 'label', 'placeholder', 'description', 'tooltip', 'text',
+    'markdownDescription', 'aria-label', 'ariaLabel',
+];
 const uiPropsPattern = uiProps.join('|');
 
-// 为每个危险短词预编译 3 种正则
+/** 键盘扫描表、VK_*、KeyCode 等键位元数据 — 禁止汉化短词误伤 */
+function isProtectedKeybindingContext(content, index, word) {
+    const radius = 160;
+    const start = Math.max(0, index - radius);
+    const end = Math.min(content.length, index + radius + word.length);
+    const slice = content.slice(start, end);
+    const escaped = escapeRegExp(word);
+
+    if (/VK_[A-Z0-9_]+/.test(slice)) return true;
+    if (/\bKeyCode\b|\bScanCode\b|keybindingService|KeyboardEvent/.test(slice)) return true;
+    if (new RegExp(`\\[\\s*\\d+\\s*,\\s*\\d+\\s*,\\s*["']${escaped}["']`).test(slice)) return true;
+    if (new RegExp(`["']${escaped}["']\\s*,\\s*\\d+\\s*,\\s*["']${escaped}["']`).test(slice)) return true;
+
+    return false;
+}
+
+// 为每个危险短词预编译 4 种正则
 const riskyRegexes = Object.entries(riskyShortWords).map(([en, zh]) => {
     const escaped = escapeRegExp(en);
     return {
@@ -43,6 +62,8 @@ const riskyRegexes = Object.entries(riskyShortWords).map(([en, zh]) => {
         jsxRegex: new RegExp(`(null|}|\\w)\\s*,\\s*(["'\`])(${escaped})\\2\\s*(?=[,)])`, 'g'),
         // HTML 标签内文本: >General<
         htmlRegex: new RegExp(`>\\s*(${escaped})\\s*<`, 'g'),
+        // HTML 模板尾部文本: >General")
+        htmlTailRegex: new RegExp(`>\\s*(${escaped})(?=\\s*(["'\`]))`, 'g'),
     };
 });
 
@@ -87,8 +108,58 @@ function detectHashAlgo(hash) {
     return 'sha256';
 }
 
-function fixProductHash(mainJsPath, productJsonPath) {
-    const updatedContent = fs.readFileSync(mainJsPath);
+/**
+ * 安全写回大文件：优先临时文件替换；失败时回退为直接覆盖。
+ */
+function writeFileSafe(filePath, content, encoding = 'utf8') {
+    const dir = path.dirname(filePath);
+    const tmpPath = path.join(dir, `.cursor-i18n-${path.basename(filePath)}.${process.pid}.tmp`);
+
+    const verifyExists = () => {
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`写入后无法找到文件: ${filePath}`);
+        }
+    };
+
+    const cleanupTmp = () => {
+        try {
+            if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+        } catch {
+            // 忽略临时文件清理失败
+        }
+    };
+
+    try {
+        fs.writeFileSync(tmpPath, content, encoding);
+        try {
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            fs.renameSync(tmpPath, filePath);
+            verifyExists();
+            return;
+        } catch {
+            cleanupTmp();
+        }
+    } catch {
+        cleanupTmp();
+    }
+
+    fs.writeFileSync(filePath, content, encoding);
+    verifyExists();
+}
+
+/**
+ * 使用内存中的文件内容更新 product.json 校验值，避免写回后立刻读盘失败。
+ * @param {string | Buffer} fileContent
+ */
+function fixProductHash(fileContent, productJsonPath) {
+    const contentBuffer = Buffer.isBuffer(fileContent)
+        ? fileContent
+        : Buffer.from(fileContent, 'utf8');
+
+    if (!fs.existsSync(productJsonPath)) {
+        throw new Error(`找不到 product.json: ${productJsonPath}`);
+    }
+
     const productJson = JSON.parse(fs.readFileSync(productJsonPath, 'utf8'));
     let hashUpdated = false;
 
@@ -98,7 +169,7 @@ function fixProductHash(mainJsPath, productJsonPath) {
                 const oldHash = productJson.checksums[key];
                 const algo = detectHashAlgo(oldHash);
                 const newHash = crypto.createHash(algo)
-                    .update(updatedContent)
+                    .update(contentBuffer)
                     .digest('base64')
                     .replace(/=+$/, '');
                 productJson.checksums[key] = newHash;
@@ -109,7 +180,7 @@ function fixProductHash(mainJsPath, productJsonPath) {
     }
 
     if (hashUpdated) {
-        fs.writeFileSync(productJsonPath, JSON.stringify(productJson, null, '\t'), 'utf8');
+        writeFileSafe(productJsonPath, JSON.stringify(productJson, null, '\t'), 'utf8');
     }
     return hashUpdated;
 }
@@ -359,6 +430,56 @@ function translate(paths) {
         printJoke();
         jsContent = jsContent.replace(regex, zh);
     });
+
+    // 5.1 设置侧边栏映射与部分编译模板片段
+    const scopedReplacements = [
+        ['general:"General"', 'general:"通用"'],
+        ['appearance:"Appearance"', 'appearance:"外观"'],
+        ['chat:"Agents"', 'chat:"智能体"'],
+        ['tab:"Tab"', 'tab:"Tab 补全"'],
+        ['models:"Models"', 'models:"模型"'],
+        ['mcp:"Tools & MCPs"', 'mcp:"工具与 MCP"'],
+        ['hooks:"Hooks"', 'hooks:"钩子"'],
+        ['beta:"Beta"', 'beta:"测试功能"'],
+        ['network:"Network"', 'network:"网络"'],
+        ['worktrees:"Worktrees"', 'worktrees:"工作树"'],
+        ['n.isGlass?"Indexing":"索引与文档"', 'n.isGlass?"索引":"索引与文档"'],
+        ['<div><span>Subagents', '<div><span>子智能体'],
+        ['<div><div title="Choose Explore subagent model"', '<div><div title="选择探索子智能体模型"'],
+        ['<div><div title="Choose 探索子智能体模型"', '<div><div title="选择探索子智能体模型"'],
+        ['aria-label="Max Mode required"', 'aria-label="需要 Max 模式"'],
+        ['SAS="Subagent model overrides will only be used in Max Mode"', 'SAS="子智能体模型覆盖仅会在 Max 模式中使用"'],
+        ['label:"Reset to default"', 'label:"重置为默认值"'],
+        ['label:"Disable",labelOutsidePicker:"Disabled"', 'label:"禁用",labelOutsidePicker:"已禁用"'],
+        ['label:"Inherit from parent"', 'label:"继承父级设置"'],
+        ['label:"Auto-Run in Sandbox"', 'label:"在沙盒中自动运行"'],
+        ['label:"Run Everything (Unsandboxed)"', 'label:"运行所有（非沙盒）"'],
+        ['return"Auto-Run in Sandbox"', 'return"在沙盒中自动运行"'],
+        ['return"Run Everything (Unsandboxed)"', 'return"运行所有（非沙盒）"'],
+        ['return"Ask for permission before running each operation"', 'return"每次操作前请求许可"'],
+        ['return"Automatically run operations after you approve them once"', 'return"在您批准一次后自动运行操作"'],
+        ['return"Automatically run all operations without asking for permission"', 'return"无需请求许可，自动运行所有操作"'],
+        ['return e?"Tools will auto-run in a sandbox if possible, otherwise respect the allowlist or ask for approval"', 'return e?"工具会尽可能在沙盒中自动运行，否则遵循白名单或请求批准"'],
+        ['label:"sandbox.json Only"', 'label:"仅 sandbox.json"'],
+        ['label:"sandbox.json + Defaults"', 'label:"sandbox.json + 默认值"'],
+        ['label:"Allow All"', 'label:"全部允许"'],
+        ['return"sandbox.json + Defaults"', 'return"sandbox.json + 默认值"'],
+        ['?"Sandboxed network access is disabled by your admin.":"Sandboxed network access is controlled by your admin. You can still edit allowed/denied domains in sandbox.json in your workspace, but admin policy takes precedence."', '?"沙盒网络访问已被管理员禁用。":"沙盒网络访问由管理员控制。您仍可在工作区的 sandbox.json 中编辑允许或拒绝的域名，但管理员策略优先。"'],
+        ['label:"Smart Allowlist"', 'label:"智能白名单"'],
+        ['description:"Use AI-powered command classification to intelligently match commands against allowlist patterns and suggest sandbox modes"', 'description:"使用 AI 命令分类智能匹配白名单模式并建议沙盒模式"'],
+        ['<strong>Deprecated Feature:</strong> The command denylist is often bypassable, providing a false sense of security. Consider using the allowlist approach instead for better security.', '<strong>已弃用功能：</strong>命令拒绝列表经常可被绕过，会造成虚假的安全感。建议改用白名单方式以获得更好的安全性。'],
+        ['"aria-label":"Select model count"', '"aria-label":"选择模型数量"'],
+    ];
+
+    scopedReplacements.forEach(([en, zh]) => {
+        printJoke();
+        jsContent = jsContent.split(en).join(zh);
+    });
+
+    jsContent = jsContent.replace(
+        /`\$\{d\.length\} worktree\$\{d\.length===1\?"":"s"\}`/g,
+        '`${d.length} 个工作树`'
+    );
     // jsContent = jsContent.split('"Reset \\"Don\'t Ask Again\\" Dialogs"').join('"重置\\"不再询问\\"弹窗"');
     // jsContent = jsContent.split("'Reset \"Don\\'t Ask Again\" Dialogs'").join("'重置\"不再询问\"弹窗'");
     // jsContent = jsContent.split('label:\'Reset "Don\\u2019t Ask Again" Dialogs\'').join('label:\'重置“不再询问”弹窗\'');
@@ -366,23 +487,36 @@ function translate(paths) {
     // jsContent = jsContent.split('title:"No Hidden Dialogs Yet"').join('title:"暂无隐藏的弹窗"');
     // jsContent = jsContent.split('description:\'You haven\\u2019t marked any dialogs as "Don\\u2019t ask again". Any hidden dialogs will appear here to manage.\'').join('description:\'您尚未将任何弹窗标记为“不再询问”。任何隐藏的弹窗都将显示在此处以供管理。\'');
 
-    // 6. 危险短词：精准 UI 属性替换
-    for (const { zh, propRegex, jsxRegex, htmlRegex } of riskyRegexes) {
+    // 6. 危险短词：精准 UI 属性替换，并跳过键盘扫描表/快捷键元数据上下文
+    for (const { en, zh, propRegex, jsxRegex, htmlRegex, htmlTailRegex } of riskyRegexes) {
         printJoke();
-        jsContent = jsContent.replace(propRegex, `$1: $2${zh}$2`);
-        jsContent = jsContent.replace(jsxRegex, `$1, $2${zh}$2`);
-        jsContent = jsContent.replace(htmlRegex, `>${zh}<`);
+        jsContent = jsContent.replace(propRegex, (match, prop, quote, _word, offset) => {
+            if (isProtectedKeybindingContext(jsContent, offset, en)) return match;
+            return `${prop}: ${quote}${zh}${quote}`;
+        });
+        jsContent = jsContent.replace(jsxRegex, (match, prefix, quote, _word, offset) => {
+            if (isProtectedKeybindingContext(jsContent, offset, en)) return match;
+            return `${prefix}, ${quote}${zh}${quote}`;
+        });
+        jsContent = jsContent.replace(htmlRegex, (match, _word, offset) => {
+            if (isProtectedKeybindingContext(jsContent, offset, en)) return match;
+            return `>${zh}<`;
+        });
+        jsContent = jsContent.replace(htmlTailRegex, (match, _word, _quote, offset) => {
+            if (isProtectedKeybindingContext(jsContent, offset, en)) return match;
+            return `>${zh}`;
+        });
     }
 
     process.stdout.write('\n'); // 收尾换行
 
     // 7. 写回
-    fs.writeFileSync(mainJsPath, jsContent, 'utf8');
+    writeFileSafe(mainJsPath, jsContent, 'utf8');
     console.log('✅ 核心 JS 文件智能汉化完成！');
 
     // 8. 修复 Hash
     console.log('\n🛠️  正在重新计算指纹并修复文件完整性...');
-    const hashFixed = fixProductHash(mainJsPath, productJsonPath);
+    const hashFixed = fixProductHash(jsContent, productJsonPath);
     if (hashFixed) {
         console.log('✅ 已更新 product.json 校验值，消除「安装已损坏」警告。');
     } else {
