@@ -7,6 +7,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D16-green?logo=node.js)](https://nodejs.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-blue)](#)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](./LICENSE)
+[![Version](https://img.shields.io/badge/Version-1.2.0-orange)](./package.json)
 
 </div>
 
@@ -14,13 +15,15 @@
 
 ## ✨ 功能亮点
 
-- 🚀 **一键汉化** — 运行即翻译，300+ 条 UI 文案全覆盖
+- 🚀 **一键汉化** — 运行即翻译，覆盖大量 Cursor UI 文案与设置页扩展词条
 - ⏪ **一键还原** — 随时恢复英文原版，干净无残留
 - 🛡️ **安装不损坏** — 自动重算文件校验值，消除「安装已损坏」警告
 - 🍎 **macOS 适配** — 自动处理 Gatekeeper 签名，免手动 `xattr`
 - 🔒 **智能提权** — 权限不足时自动请求管理员权限，无需手动右键
 - 💾 **自动备份** — 首次运行自动备份原文件，确保可逆
 - 📦 **可打包分发** — 支持 `pkg` 打包为独立可执行文件，无需安装 Node.js
+- 📂 **智能定位安装路径** — 自动搜索 Cursor 安装目录，支持手动指定与多版本选择
+- 🧭 **路径记忆** — 上次使用的安装路径保存到用户配置，下次自动沿用
 
 ## 📸 效果预览
 
@@ -40,12 +43,17 @@
 ```
   ┌──────────────────────────────────────┐
   │ ♥ ♠ ♦ ♣ Cursor 一键汉化工具 ♣ ♦ ♠ ♥  │
-  │      周四学习钉钉联系我 v1.0.0       │
+  │      周四学习钉钉联系我 v1.2.0       │
   │           作者: 不辞水               │
   │     🂡 All in 完美汉化，梭哈！🂡       │
   └──────────────────────────────────────┘
 
-  📂 已定位 Cursor: C:\Users\xxx\AppData\Local\Programs\cursor\resources\app
+  📂 Cursor: C:\Users\xxx\AppData\Local\Programs\cursor\resources\app
+
+? 已定位 Cursor，是否使用此路径？
+> ✓ 使用: ...\resources\app
+  📁 手动指定其他路径
+  🔍 重新自动搜索
 
 ? 请选择你的策略：
 > 🚀  一键汉化 ———— 拿你价值
@@ -87,9 +95,29 @@ cd cursor-i18n-tool
 # 2. 安装依赖
 npm install
 
-# 3. 启动（交互式菜单）
+# 3. 启动（交互式菜单，自动或手动选择 Cursor 安装路径）
 node index.js
 ```
+
+### 指定 Cursor 安装路径
+
+若 Cursor 安装在非默认位置（例如 `D:\Program Files\cursor\`），启动时可：
+
+- 在交互菜单中选择 **手动指定其他路径** 或 **重新自动搜索**
+- 使用命令行参数 `--cursor-path`（支持安装根目录、`resources/app`、`Cursor.exe` 或 macOS 的 `Cursor.app`）
+
+配置会保存到：
+
+| 平台 | 路径 |
+|------|------|
+| Windows / macOS / Linux | `~/.cursor-i18n-tool/config.json` |
+
+**自动搜索范围（摘要）：**
+
+| 平台 | 默认探测位置 |
+|------|----------------|
+| Windows | `%LOCALAPPDATA%\Programs\cursor`、Program Files、注册表 `InstallLocation` |
+| macOS | `/Applications/Cursor.app`、`~/Applications/Cursor.app` 及 `Cursor*.app` 扫描 |
 
 ### 命令行静默模式
 
@@ -97,9 +125,17 @@ node index.js
 # 直接汉化（跳过交互菜单，适合脚本调用）
 node index.js --action=translate
 
+# 指定安装路径后汉化（路径含空格请加引号）
+node index.js --action=translate --cursor-path="D:\Program Files\cursor"
+
 # 恢复英文
 node index.js --action=restore
+
+# 指定路径后恢复
+node index.js --action=restore --cursor-path="D:\Program Files\cursor"
 ```
+
+> 提权后的子进程会携带 `--cursor-path`，无需再次选择路径。
 
 ## 🏗️ 项目结构
 
@@ -108,8 +144,8 @@ cursor-i18n-tool/
 ├── index.js              # 入口文件：交互菜单 + 提权逻辑
 ├── src/
 │   ├── i18n-core.js      # 核心引擎：正则替换 + Hash 修复 + Gatekeeper
-│   ├── dict.js           # 翻译字典：300+ 条 UI 文案映射
-│   └── platform.js       # 平台适配：路径探测 + 权限检测 + 提权
+│   ├── dict.js           # 翻译字典：大量 UI 文案映射
+│   └── platform.js       # 平台适配：路径探测/规范化/配置 + 权限检测 + 提权
 ├── package.json
 └── README.md
 ```
@@ -125,15 +161,18 @@ cursor-i18n-tool/
 | **L1** 顽固词条 | `trickyReplacements` 逐条硬替换 | 含特殊转义、模板字符串的复杂词条 |
 | **L2** 安全长句 | `safeMegaRegex` 单次大正则 | 被引号包裹的长句（按长度降序匹配） |
 | **L3** 裸文本长句 | `longMegaRegex` 兜底匹配 | ≥20 字符的裸文本（不与代码变量冲突） |
-| **L4** 危险短词 | `riskyRegexes` 上下文感知 | 短词仅在 `children:`、`title:` 等 UI 属性中替换 |
+| **L4** 危险短词 | `riskyRegexes` 上下文感知 | 短词仅在 `children:`、`title:` 等 UI 属性中替换；键位扫描表附近自动跳过 |
+| **L4.5** 作用域替换 | `scopedReplacements` 精确字符串 | 设置侧栏 ID、编译后模板片段等 `dict` 无法覆盖的文案 |
 
 ### 文件完整性修复
 
 Cursor 启动时会校验核心文件的哈希值，修改后会弹出「安装已损坏」警告。本工具会：
 
-1. 读取修改后的 `workbench.desktop.main.js`
+1. 使用内存中已汉化的 `workbench.desktop.main.js` 内容（避免写回后立刻读盘失败，尤其 `Program Files` 目录）
 2. 重新计算哈希值（自动检测 MD5/SHA256/SHA512）
 3. 更新 `product.json` 中对应的校验值
+
+核心 JS 写回采用「临时文件替换 + 直接覆盖回退」，在文件被占用或权限环境复杂时尽量保持稳定。
 
 ### macOS Gatekeeper 处理
 
